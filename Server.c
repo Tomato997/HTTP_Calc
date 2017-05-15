@@ -24,12 +24,13 @@
 
 //#define BYTES 		1024
 
-#define MAX_BUFFER_LENGTH 		1024
-#define MAX_CLIENTS		  		1024
-#define MAX_PENDING_CONNECTIONS	4096
-#define MAX_REQUEST_LENGTH		32768
-#define MAX_RESPONSE_LENGTH		32768
-#define MAX_PATH_LENGTH			256
+#define MAX_BUFFER_LENGTH 			1024
+#define MAX_CLIENTS		  			1024
+#define MAX_PENDING_CONNECTIONS		4096
+#define MAX_REQUEST_LENGTH			32768
+#define MAX_RESPONSE_LENGTH			32768
+#define MAX_PATH_LENGTH				256
+#define MAX_CONTENT_LENGTH_BUFFER 	256
 
 // BUILD: clang -Wall --pedantic -D_POSIX_C_SOURCE=200809L Server.c
 // RUN: change PWD before start
@@ -174,8 +175,42 @@ char responseHeaderBuffer[MAX_RESPONSE_LENGTH];
 
 void build200Response()
 {
+	const char daysOfWeek[7][3] = {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"};
+	const char monthsOfYear[12][3] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
 
+	// Get current time
+	struct tm *GMT;
+	time_t rawtime;
 
+	time(&rawtime);
+
+	// Get GMT time from current time
+	memset((void *)&GMT, 0, sizeof(struct tm));
+	GMT = gmtime(&rawtime);
+
+	//printf("HH:MM:SS = %02d:%02d:%02d\n", GMT->tm_hour, GMT->tm_min, GMT->tm_sec);
+
+	// Clear response buffer
+	memset((void *)responseHeaderBuffer, 0, MAX_RESPONSE_LENGTH);
+
+	// Create HTTP client response
+	snprintf(responseHeaderBuffer, MAX_RESPONSE_LENGTH, "HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-cache\r\nDate: %.3s, %02d %.3s %d %02d:%02d:%02d GMT\r\nServer: KnoblHyperActiveServer(1.0)\r\n",
+			daysOfWeek[GMT->tm_wday], GMT->tm_mday, monthsOfYear[GMT->tm_mon], GMT->tm_year + 1900, GMT->tm_hour, GMT->tm_min, GMT->tm_sec);
+	//
+	for (int n = 0; n < strlen(responseHeaderBuffer); n++)
+	{
+		printf("'%d-%c' - ", responseHeaderBuffer[n], responseHeaderBuffer[n]);
+	}
+}
+
+void appendContentLength(int contentLength)
+{
+	char contentLengthBuffer[MAX_CONTENT_LENGTH_BUFFER] = {0, };
+
+	snprintf(contentLengthBuffer, MAX_CONTENT_LENGTH_BUFFER, "Content-Length: %d\r\n\r\n", contentLength);
+
+	// Get the absolute location of the file name
+    strncpy(&responseHeaderBuffer[strlen(responseHeaderBuffer)], contentLengthBuffer, strlen(contentLengthBuffer));
 }
 
 
@@ -183,15 +218,14 @@ void build200Response()
 void processClient(int clientIndex)
 {
     char *rootDirectory;
-	char clientRequestBuffer[MAX_REQUEST_LENGTH], clientResponseBuffer[MAX_RESPONSE_LENGTH], fileName[MAX_PATH_LENGTH];
+	char clientRequestBuffer[MAX_REQUEST_LENGTH], clientPayloadBuffer[MAX_RESPONSE_LENGTH], fileName[MAX_PATH_LENGTH];
     int rcvd, fd, n;
 
 	int bytesSent = 0, bytesRead = 0;
 
 	char *requestMethod, *requestURL, *protocolVersion;
 
-	const char daysOfWeek[7][3] = {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"};
-	const char monthsOfYear[12][3] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+
 
 	// Get root directory
 	rootDirectory = getenv("PWD");
@@ -278,26 +312,11 @@ void processClient(int clientIndex)
 
 				}
 
-
-
-
 				// Get the absolute location of the file name
 				strncpy(fileName, rootDirectory, strlen(rootDirectory));
                 strncpy(&fileName[strlen(rootDirectory)], requestURL, strlen(requestURL));
 
 				printf("------REQUEST DATA PROCESSED:------\nrequestMethod = '%s'\nrequestURL = '%s'\nprotocolVersion = '%s'\nfileName = '%s'\n\n", requestMethod, requestURL, protocolVersion, fileName);
-
-				// Get current time
-				struct tm *GMT;
-				time_t rawtime;
-
-				time(&rawtime);
-
-				// Get GMT time from current time
-				memset((void *)&GMT, 0, sizeof(struct tm));
-				GMT = gmtime(&rawtime);
-
-				//printf("HH:MM:SS = %02d:%02d:%02d\n", GMT->tm_hour, GMT->tm_min, GMT->tm_sec);
 
 				// Does the file exist?
                 if ((fd = open(fileName, O_RDONLY)) != -1)
@@ -313,23 +332,22 @@ void processClient(int clientIndex)
 						fsize = 0;
 					}
 
-					// Clear response buffer
-					memset((void *)&clientResponseBuffer, 0, MAX_RESPONSE_LENGTH);
+					// Build default response
+					build200Response();
 
-					// Create HTTP client response
-					snprintf(clientResponseBuffer, MAX_RESPONSE_LENGTH, "HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-cache\r\nDate: %.3s, %02d %.3s %d %02d:%02d:%02d GMT\r\nServer: KnoblHyperActiveServer(1.0)\r\nContent-Length: %d\r\n\r\n",
-							daysOfWeek[GMT->tm_wday], GMT->tm_mday, monthsOfYear[GMT->tm_mon], GMT->tm_year + 1900, GMT->tm_hour, GMT->tm_min, GMT->tm_sec, (int)fsize);
+					// Add Content Length parameter
+					//appendContentLength(fsize);
 
 					// Seek to the beginning of the file
 					lseek(fd, 0, SEEK_SET);
 
-					printf("------HTTP RESPONSE:------\n%s\n\n", clientResponseBuffer);
+					printf("------HTTP RESPONSE:------\n%s\n\n", responseHeaderBuffer);
 
 					// Send response header to client
-					bytesSent = write(clients[clientIndex], clientResponseBuffer, strlen(clientResponseBuffer));
+					bytesSent = write(clients[clientIndex], responseHeaderBuffer, strlen(responseHeaderBuffer));
 
 					// Check send status
-					if (bytesSent == strlen(clientResponseBuffer))
+					if (bytesSent == strlen(responseHeaderBuffer))
 					{
 						printf("INFO: Response header sent OK!\n\n");
 					}
@@ -339,13 +357,13 @@ void processClient(int clientIndex)
 					}
 
 					// Clear response buffer
-					memset((void *)&clientResponseBuffer, 0, MAX_RESPONSE_LENGTH);
+					memset((void *)&clientPayloadBuffer, 0, MAX_RESPONSE_LENGTH);
 
 					// Read the file until end
-                    while ((bytesSent = read(fd, clientResponseBuffer, MAX_RESPONSE_LENGTH)) > 0)
+                    while ((bytesSent = read(fd, clientPayloadBuffer, MAX_RESPONSE_LENGTH)) > 0)
 					{
                     	// Send payload response buffer to client
-						write(clients[clientIndex], clientResponseBuffer, bytesSent);
+						write(clients[clientIndex], clientPayloadBuffer, bytesSent);
 					}
                 }
                 else
