@@ -28,9 +28,10 @@
 #define MAX_CLIENTS		  			1024
 #define MAX_PENDING_CONNECTIONS		4096
 #define MAX_REQUEST_LENGTH			32768
-#define MAX_RESPONSE_LENGTH			32768
+#define MAX_RESPONSE_LENGTH			4096
 #define MAX_PATH_LENGTH				256
 #define MAX_CONTENT_LENGTH_BUFFER 	256
+#define MAX_PAYLOAD_LENGTH			4096
 
 // BUILD: clang -Wall --pedantic -D_POSIX_C_SOURCE=200809L Server.c
 // RUN: change PWD before start
@@ -80,6 +81,9 @@ int main (int argc, char **argv)
 			break;
 		}
 	}
+
+	// Init random number generator
+	srand(time(NULL));
 
 	printf("Starting HTTP_Calc Server on port %s...\n", strPort);
 
@@ -172,6 +176,7 @@ int main (int argc, char **argv)
 }
 
 char responseHeaderBuffer[MAX_RESPONSE_LENGTH];
+char responsePayloadBuffer[MAX_PAYLOAD_LENGTH];
 
 void build200Response()
 {
@@ -180,27 +185,20 @@ void build200Response()
 
 	// Get current time
 	struct tm *GMT;
-	time_t rawtime;
+	time_t now;
 
-	time(&rawtime);
+	time(&now);
 
 	// Get GMT time from current time
-	memset((void *)&GMT, 0, sizeof(struct tm));
-	GMT = gmtime(&rawtime);
+	GMT = gmtime(&now);
 
-	//printf("HH:MM:SS = %02d:%02d:%02d\n", GMT->tm_hour, GMT->tm_min, GMT->tm_sec);
-
-	// Clear response buffer
-	memset((void *)responseHeaderBuffer, 0, MAX_RESPONSE_LENGTH);
+	// Clear response buffers
+	memset((void *)responseHeaderBuffer,  0, MAX_RESPONSE_LENGTH);
+	memset((void *)responsePayloadBuffer, 0, MAX_PAYLOAD_LENGTH);
 
 	// Create HTTP client response
 	snprintf(responseHeaderBuffer, MAX_RESPONSE_LENGTH, "HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-cache\r\nDate: %.3s, %02d %.3s %d %02d:%02d:%02d GMT\r\nServer: KnoblHyperActiveServer(1.0)\r\n",
 			daysOfWeek[GMT->tm_wday], GMT->tm_mday, monthsOfYear[GMT->tm_mon], GMT->tm_year + 1900, GMT->tm_hour, GMT->tm_min, GMT->tm_sec);
-	//
-	for (int n = 0; n < strlen(responseHeaderBuffer); n++)
-	{
-		printf("'%d-%c' - ", responseHeaderBuffer[n], responseHeaderBuffer[n]);
-	}
 }
 
 void appendContentLength(int contentLength)
@@ -213,19 +211,65 @@ void appendContentLength(int contentLength)
     strncpy(&responseHeaderBuffer[strlen(responseHeaderBuffer)], contentLengthBuffer, strlen(contentLengthBuffer));
 }
 
+void printResponseHeaderBuffer()
+{
+	printf("------HTTP RESPONSE------\n");
+
+	if (write(STDOUT_FILENO, responseHeaderBuffer, strlen(responseHeaderBuffer)) == -1)
+	{
+		perror ("error writing to screen");
+		exit(EXIT_FAILURE);
+	}
+}
+
+void sendDataToClient(int clientIndex)
+{
+	// Append Content Length property
+	appendContentLength(strlen(responsePayloadBuffer));
+
+	// Send response header buffer to client
+	if (write(clients[clientIndex], responseHeaderBuffer, strlen(responseHeaderBuffer)) > 0)
+	{
+		// Send payload response buffer to client
+		if (write(clients[clientIndex], responsePayloadBuffer, strlen(responsePayloadBuffer)) > 0)
+		{
+			printResponseHeaderBuffer();
+			printf("INFO: Data sent to client OK!\n");
+		}
+		else
+		{
+			printf("ERROR: Error sending Payload to client!\n");
+		}
+	}
+	else
+	{
+		printf("ERROR: Error sending Header to client!\n");
+	}
+
+    // Close SOCKET
+    if (shutdown(clients[clientIndex], SHUT_RDWR) == -1)
+	{
+		printf("ERROR: Could not shutdown client socket!\n");
+	}
+
+    if (close(clients[clientIndex]) == -1)
+	{
+		printf("ERROR: Could not close client socket!\n");
+	}
+
+    clients[clientIndex] = -1;
+}
 
 // Process client connection
 void processClient(int clientIndex)
 {
     char *rootDirectory;
-	char clientRequestBuffer[MAX_REQUEST_LENGTH], clientPayloadBuffer[MAX_RESPONSE_LENGTH], fileName[MAX_PATH_LENGTH];
+	char clientRequestBuffer[MAX_REQUEST_LENGTH], fileName[MAX_PATH_LENGTH];
     int rcvd, fd, n;
 
 	int bytesSent = 0, bytesRead = 0;
 
 	char *requestMethod, *requestURL, *protocolVersion;
-
-
 
 	// Get root directory
 	rootDirectory = getenv("PWD");
@@ -235,7 +279,7 @@ void processClient(int clientIndex)
 		printf("ERROR: Could not get root directory!\n\n");
 	}
 
-	// Clear client request buffer
+	// Clear buffer
     memset((void *)clientRequestBuffer, 0, MAX_REQUEST_LENGTH);
 
 	// Receive client request
@@ -299,77 +343,106 @@ void processClient(int clientIndex)
 				// Handle Random number service
 				if (strncmp(requestURL, "/serv/random/", 13) == 0)
 				{
-					printf("OK!!!!!! --> '%s'", requestURL + 13);
-					long maxRandomNumber = 0;
+					const char randomServiceTemplate[] 		= "<html><head><title>Random Number Service</title></head><body>Your random Number between 0 and %f is %f.</body></html>";
+					const char randomServiceTemplateError[] = "<html><head><title>Random Number Service</title></head><body>ERROR: Your maximum Random Number is invalid!</body></html>";
 
-					maxRandomNumber = strtol("", NULL, 10);
+					// Buld HTTP response
+					build200Response();
+
+					printf("OK!!!!!! --> '%s'", requestURL + 13);
+
+					double maxRandomNumber = 0;
+
+					maxRandomNumber = strtod(requestURL + 13, NULL);
 
 					// Check conversion
 					if (maxRandomNumber == 0)
 					{
-
-					}
-
-				}
-
-				// Get the absolute location of the file name
-				strncpy(fileName, rootDirectory, strlen(rootDirectory));
-                strncpy(&fileName[strlen(rootDirectory)], requestURL, strlen(requestURL));
-
-				printf("------REQUEST DATA PROCESSED:------\nrequestMethod = '%s'\nrequestURL = '%s'\nprotocolVersion = '%s'\nfileName = '%s'\n\n", requestMethod, requestURL, protocolVersion, fileName);
-
-				// Does the file exist?
-                if ((fd = open(fileName, O_RDONLY)) != -1)
-                {
-					off_t fsize;
-
-					// Get file length
-					fsize = lseek(fd, 0, SEEK_END);
-
-					// Check file length
-					if (fsize == -1)
-					{
-						fsize = 0;
-					}
-
-					// Build default response
-					build200Response();
-
-					// Add Content Length parameter
-					//appendContentLength(fsize);
-
-					// Seek to the beginning of the file
-					lseek(fd, 0, SEEK_SET);
-
-					printf("------HTTP RESPONSE:------\n%s\n\n", responseHeaderBuffer);
-
-					// Send response header to client
-					bytesSent = write(clients[clientIndex], responseHeaderBuffer, strlen(responseHeaderBuffer));
-
-					// Check send status
-					if (bytesSent == strlen(responseHeaderBuffer))
-					{
-						printf("INFO: Response header sent OK!\n\n");
+						// Create webpage from template
+						snprintf(responsePayloadBuffer, MAX_PAYLOAD_LENGTH, randomServiceTemplateError);
 					}
 					else
 					{
-						printf("ERROR: Failed sending response header to client!\n\n");
+						// Generate a random number
+						srand(time(NULL));
+						double randomNumber = ((double)rand() / (double)(RAND_MAX)) * maxRandomNumber;
+
+						// Create webpage from template
+						snprintf(responsePayloadBuffer, MAX_PAYLOAD_LENGTH, randomServiceTemplate, maxRandomNumber, randomNumber);
 					}
 
-					// Clear response buffer
-					memset((void *)&clientPayloadBuffer, 0, MAX_RESPONSE_LENGTH);
+					// Send data
+					sendDataToClient(clientIndex);
 
-					// Read the file until end
-                    while ((bytesSent = read(fd, clientPayloadBuffer, MAX_RESPONSE_LENGTH)) > 0)
-					{
-                    	// Send payload response buffer to client
-						write(clients[clientIndex], clientPayloadBuffer, bytesSent);
-					}
-                }
-                else
+					return;
+				}
+				else if (1)
 				{
-					// Send File Not Found to client
-					write(clients[clientIndex], "HTTP/1.0 404 Not Found\r\n", 24);
+
+				}
+				else
+				{
+					// Send a File
+					//
+					// Get the absolute location of the file name
+					strncpy(fileName, rootDirectory, strlen(rootDirectory));
+		            strncpy(&fileName[strlen(rootDirectory)], requestURL, strlen(requestURL));
+
+					printf("------REQUEST DATA PROCESSED:------\nrequestMethod = '%s'\nrequestURL = '%s'\nprotocolVersion = '%s'\nfileName = '%s'\n\n", requestMethod, requestURL, protocolVersion, fileName);
+
+					// Does the file exist?
+		            if ((fd = open(fileName, O_RDONLY)) != -1)
+		            {
+						off_t fsize;
+
+						// Get file length
+						fsize = lseek(fd, 0, SEEK_END);
+
+						// Check file length
+						if (fsize == -1)
+						{
+							fsize = 0;
+						}
+
+						// Build default response
+						build200Response();
+
+						// Add Content Length parameter
+						appendContentLength(fsize);
+
+						printResponseHeaderBuffer();
+
+						// Seek to the beginning of the file
+						lseek(fd, 0, SEEK_SET);
+
+						// Send response header to client
+						bytesSent = write(clients[clientIndex], responseHeaderBuffer, strlen(responseHeaderBuffer));
+
+						// Check send status
+						if (bytesSent == strlen(responseHeaderBuffer))
+						{
+							printf("INFO: Response header sent OK!\n\n");
+						}
+						else
+						{
+							printf("ERROR: Failed sending response header to client!\n\n");
+						}
+
+						// Clear response buffer
+						memset((void *)&responsePayloadBuffer, 0, MAX_PAYLOAD_LENGTH);
+
+						// Read the file until end
+		                while ((bytesSent = read(fd, responsePayloadBuffer, MAX_PAYLOAD_LENGTH)) > 0)
+						{
+		                	// Send payload response buffer to client
+							write(clients[clientIndex], responsePayloadBuffer, bytesSent);
+						}
+		            }
+		            else
+					{
+						// Send File Not Found to client
+						write(clients[clientIndex], "HTTP/1.0 404 Not Found\r\n", 24);
+					}
 				}
             }
         }
