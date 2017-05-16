@@ -4,25 +4,26 @@
 /*   Copyright(c) 2017 by Felix Knobl, FH Technikum Wien    */
 /************************************************************/
 
-#include <sys/socket.h> // socket(), bind(), ...
-#include <netinet/in.h> // struct sockaddr_in
-#include <strings.h> // memset(), ...
-#include <unistd.h>  // write(), close(), ...
 #include <stdio.h> // printf(), sprintf()
+#include <stdlib.h> // exit()
+#include <stdbool.h>
+#include <unistd.h>  // write(), close(), ...
+#include <sys/socket.h> // socket(), bind(), ...
+#include <sys/wait.h>  // waitpid()
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <netinet/in.h> // struct sockaddr_in
 #include <arpa/inet.h> // inet_ntoa(), ...
 #include <string.h>  // strlen()
-#include  <sys/types.h>
-#include  <sys/stat.h>
-#include  <fcntl.h>
-#include  <netdb.h>
-#include <sys/wait.h>  // waitpid()
+#include <strings.h> // memset(), ...
+#include <fcntl.h>
+#include <netdb.h>
 #include <signal.h> // signal()
-#include <stdlib.h> // exit()
 #include <time.h>
+#include <math.h>
+
 
 #define DEFAULT_PORTNUMBER 	6655
-
-//#define BYTES 		1024
 
 #define MAX_BUFFER_LENGTH 			1024
 #define MAX_CLIENTS		  			1024
@@ -33,7 +34,7 @@
 #define MAX_CONTENT_LENGTH_BUFFER 	256
 #define MAX_PAYLOAD_LENGTH			4096
 
-// BUILD: clang -Wall --pedantic -D_POSIX_C_SOURCE=200809L Server.c
+// BUILD: clang -Wall -lm --pedantic -D_POSIX_C_SOURCE=200809L Server.c
 // RUN: change PWD before start
 
 int clients[MAX_CLIENTS];
@@ -178,10 +179,51 @@ int main (int argc, char **argv)
 char responseHeaderBuffer[MAX_RESPONSE_LENGTH];
 char responsePayloadBuffer[MAX_PAYLOAD_LENGTH];
 
-void build200Response()
+void buildResponseHeader(int statusCode)
 {
-	const char daysOfWeek[7][3] = {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"};
-	const char monthsOfYear[12][3] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+	const char daysOfWeek[7][4] = {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"};
+	const char monthsOfYear[12][4] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+
+	const char statusCode200[] = "200 OK";
+	const char statusCode400[] = "400 Bad Request";
+	const char statusCode404[] = "404 Not Found";
+	const char statusCode405[] = "405 Method Not Allowed\r\nAllow: GET, HEAD";
+	const char statusCode414[] = "414 Request-URI Too Long";
+	const char statusCode500[] = "500 Internal Server Error";
+
+	char statusCodeBuffer[128] = {0, };
+
+	switch (statusCode)
+	{
+		case 200:
+			strncpy(statusCodeBuffer, statusCode200, strlen(statusCode200));
+			break;
+
+		case 400:
+			strncpy(statusCodeBuffer, statusCode400, strlen(statusCode400));
+			break;
+
+		case 404:
+			strncpy(statusCodeBuffer, statusCode404, strlen(statusCode404));
+			break;
+
+		case 405:
+			strncpy(statusCodeBuffer, statusCode405, strlen(statusCode405));
+			break;
+
+		case 414:
+			strncpy(statusCodeBuffer, statusCode414, strlen(statusCode414));
+			break;
+
+		case 500:
+			strncpy(statusCodeBuffer, statusCode500, strlen(statusCode500));
+			break;
+
+		default:
+			return;
+			break;
+	}
+
 
 	// Get current time
 	struct tm *GMT;
@@ -197,8 +239,8 @@ void build200Response()
 	memset((void *)responsePayloadBuffer, 0, MAX_PAYLOAD_LENGTH);
 
 	// Create HTTP client response
-	snprintf(responseHeaderBuffer, MAX_RESPONSE_LENGTH, "HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-cache\r\nDate: %.3s, %02d %.3s %d %02d:%02d:%02d GMT\r\nServer: KnoblHyperActiveServer(1.0)\r\n",
-			daysOfWeek[GMT->tm_wday], GMT->tm_mday, monthsOfYear[GMT->tm_mon], GMT->tm_year + 1900, GMT->tm_hour, GMT->tm_min, GMT->tm_sec);
+	snprintf(responseHeaderBuffer, MAX_RESPONSE_LENGTH, "HTTP/1.1 %s\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-cache\r\nDate: %.3s, %02d %.3s %d %02d:%02d:%02d GMT\r\nServer: KnoblHyperActiveServer(1.0)\r\n",
+			 statusCodeBuffer, daysOfWeek[GMT->tm_wday], GMT->tm_mday, monthsOfYear[GMT->tm_mon], GMT->tm_year + 1900, GMT->tm_hour, GMT->tm_min, GMT->tm_sec);
 }
 
 void appendContentLength(int contentLength)
@@ -260,16 +302,32 @@ void sendDataToClient(int clientIndex)
     clients[clientIndex] = -1;
 }
 
+bool convertToDouble(char *input, double *result)
+{
+	char *strEnd = NULL;
+
+	*result = strtod(input, &strEnd);
+
+	// Check conversion
+	if (input == strEnd || *strEnd != '\0')
+	{
+		return false;
+	}
+	else
+	{
+		return true;
+	}
+}
+
 // Process client connection
 void processClient(int clientIndex)
 {
     char *rootDirectory;
-	char clientRequestBuffer[MAX_REQUEST_LENGTH], fileName[MAX_PATH_LENGTH];
-    int rcvd, fd, n;
-
-	int bytesSent = 0, bytesRead = 0;
-
 	char *requestMethod, *requestURL, *protocolVersion;
+	char clientRequestBuffer[MAX_REQUEST_LENGTH], fileName[MAX_PATH_LENGTH];
+
+	int fd, n;
+	int bytesSent = 0, bytesRead = 0;
 
 	// Get root directory
 	rootDirectory = getenv("PWD");
@@ -283,13 +341,13 @@ void processClient(int clientIndex)
     memset((void *)clientRequestBuffer, 0, MAX_REQUEST_LENGTH);
 
 	// Receive client request
-    rcvd = recv(clients[clientIndex], clientRequestBuffer, MAX_REQUEST_LENGTH, 0);
+    bytesRead = recv(clients[clientIndex], clientRequestBuffer, MAX_REQUEST_LENGTH, 0);
 
-    if (rcvd < 0)
+    if (bytesRead < 0)
 	{
         printf("ERROR: Receive error client ID: %d!\n", clientIndex);
 	}
-    else if (rcvd == 0)
+    else if (bytesRead == 0)
 	{
         printf("ERROR: Client ID: %d disconnected upexpectedly. Receive Socket closed!\n", clientIndex);
 	}
@@ -307,8 +365,8 @@ void processClient(int clientIndex)
 		else if (strncmp(requestMethod, "GET\0", 4) == 0)
         {
 			// Check if GET request has been received
-            requestURL = strtok (NULL, " \t");	 	// Parse URL
-            protocolVersion = strtok (NULL, " \t\r\n"); 	// Parse HTTP version
+            requestURL = strtok (NULL, " \t");	 		// Parse URL
+            protocolVersion = strtok (NULL, " \t\r\n"); // Parse HTTP version
 
 			printf("------REQUEST DATA:------\nrequestMethod = '%s'\nrequestURL = '%s'\nprotocolVersion = '%s'\n\n", requestMethod, requestURL, protocolVersion);
 
@@ -339,36 +397,41 @@ void processClient(int clientIndex)
 					requestURL = "/index.html";
 				}
 
+				printf("------REQUEST DATA (TRAILED)------\nrequestMethod = '%s'\nrequestURL = '%s'\nprotocolVersion = '%s'\n\n", requestMethod, requestURL, protocolVersion);
 
-				// Handle Random number service
-				if (strncmp(requestURL, "/serv/random/", 13) == 0)
+				// HANDLER
+				if (strncmp(requestURL, "/serv/random", 12) == 0)
 				{
-					const char randomServiceTemplate[] 		= "<html><head><title>Random Number Service</title></head><body>Your random Number between 0 and %f is %f.</body></html>";
-					const char randomServiceTemplateError[] = "<html><head><title>Random Number Service</title></head><body>ERROR: Your maximum Random Number is invalid!</body></html>";
+					// HANDLING: A random floating-point number in the range between 0 and <Number>
+					const char randomServiceTemplate[] = "<html><head><title>Random Number Service</title></head><body>Your random number between 0 and %f is %f.</body></html>";
+					double number = 0;
+					double result = 0;
 
-					// Buld HTTP response
-					build200Response();
+					requestURL += 12;
 
-					printf("OK!!!!!! --> '%s'", requestURL + 13);
-
-					double maxRandomNumber = 0;
-
-					maxRandomNumber = strtod(requestURL + 13, NULL);
-
-					// Check conversion
-					if (maxRandomNumber == 0)
+					if (*requestURL == '\0')
 					{
-						// Create webpage from template
-						snprintf(responsePayloadBuffer, MAX_PAYLOAD_LENGTH, randomServiceTemplateError);
+						// Build HTTP response
+						buildResponseHeader(400);
 					}
-					else
+
+					// Check conversion & number
+					else if (convertToDouble(++requestURL, &number) && number >= 0)
 					{
 						// Generate a random number
 						srand(time(NULL));
-						double randomNumber = ((double)rand() / (double)(RAND_MAX)) * maxRandomNumber;
+						result = ((double)rand() / (double)(RAND_MAX)) * number;
+
+						// Build HTTP response
+						buildResponseHeader(200);
 
 						// Create webpage from template
-						snprintf(responsePayloadBuffer, MAX_PAYLOAD_LENGTH, randomServiceTemplate, maxRandomNumber, randomNumber);
+						snprintf(responsePayloadBuffer, MAX_PAYLOAD_LENGTH, randomServiceTemplate, number, result);
+					}
+					else
+					{
+						// Build HTTP response
+						buildResponseHeader(500);
 					}
 
 					// Send data
@@ -376,9 +439,136 @@ void processClient(int clientIndex)
 
 					return;
 				}
-				else if (1)
+				else if (strncmp(requestURL, "/calc/sqrt/", 11) == 0)
 				{
+					// HANDLING: The square root of the floating-point number
+					const char squareRootTemplate[] = "<html><head><title>Square Root Calculator</title></head><body>The square root of the number %f is %f.</body></html>";
+					double number = 0;
+					double result = 0;
 
+					requestURL += 11;
+
+					// Check conversion
+					if (convertToDouble(requestURL, &number) && number >= 0)
+					{
+						// Calculate result
+						result = sqrt(number);
+
+						// Build HTTP response
+						buildResponseHeader(200);
+
+						// Create webpage from template
+						snprintf(responsePayloadBuffer, MAX_PAYLOAD_LENGTH, squareRootTemplate, number, result);
+					}
+					else
+					{
+						// Build HTTP response
+						buildResponseHeader(500);
+					}
+
+					// Send data
+					sendDataToClient(clientIndex);
+
+					return;
+				}
+				else if (strncmp(requestURL, "/calc/func/sin/", 15) == 0)
+				{
+					// HANDLING: The value of the sine function for the given floating-point radian angle <Number>
+					const char sinTemplate[] = "<html><head><title>Sine Calculator</title></head><body>The result of the sine function for the radian angle number %f is %f.</body></html>";
+					double number = 0;
+					double result = 0;
+
+					// Move pointer to the start of the number
+					requestURL += 15;
+
+					// Check conversion
+					if (convertToDouble(requestURL, &number))
+					{
+						// Calculate result
+						result = sin(number);
+
+						// Build HTTP response
+						buildResponseHeader(200);
+
+						// Create webpage from template
+						snprintf(responsePayloadBuffer, MAX_PAYLOAD_LENGTH, sinTemplate, number, result);
+					}
+					else
+					{
+						// Build HTTP response
+						buildResponseHeader(500);
+					}
+
+					// Send data
+					sendDataToClient(clientIndex);
+
+					return;
+				}
+				else if (strncmp(requestURL, "/calc/func/cos/", 15) == 0)
+				{
+					// HANDLING: The value of the cosinus function for the given floating-point radian angle <Number>
+					const char cosTemplate[] = "<html><head><title>Cosine Calculator</title></head><body>The result of the cosine function for the radian angle number %f is %f.</body></html>";
+					double number = 0;
+					double result = 0;
+
+					// Move pointer to the start of the number
+					requestURL += 15;
+
+					// Check conversion
+					if (convertToDouble(requestURL, &number))
+					{
+						// Calculate result
+						result = cos(number);
+
+						// Build HTTP response
+						buildResponseHeader(200);
+
+						// Create webpage from template
+						snprintf(responsePayloadBuffer, MAX_PAYLOAD_LENGTH, cosTemplate, number, result);
+					}
+					else
+					{
+						// Build HTTP response
+						buildResponseHeader(500);
+					}
+
+					// Send data
+					sendDataToClient(clientIndex);
+
+					return;
+				}
+				else if (strncmp(requestURL, "/calc/func/tan/", 15) == 0)
+				{
+					// HANDLING: The value of the tangens function for the given floating-point radian angle <Number>
+					const char tanTemplate[] = "<html><head><title>Tangens Calculator</title></head><body>The result of the tangens function for the radian angle number %f is %f.</body></html>";
+					double number = 0;
+					double result = 0;
+
+					// Move pointer to the start of the number
+					requestURL += 15;
+
+					// Check conversion
+					if (convertToDouble(requestURL, &number))
+					{
+						// Calculate result
+						result = tan(number);
+
+						// Build HTTP response
+						buildResponseHeader(200);
+
+						// Create webpage from template
+						snprintf(responsePayloadBuffer, MAX_PAYLOAD_LENGTH, tanTemplate, number, result);
+					}
+					else
+					{
+						// Build HTTP response
+						buildResponseHeader(500);
+					}
+
+					// Send data
+					sendDataToClient(clientIndex);
+
+					return;
 				}
 				else
 				{
@@ -388,7 +578,7 @@ void processClient(int clientIndex)
 					strncpy(fileName, rootDirectory, strlen(rootDirectory));
 		            strncpy(&fileName[strlen(rootDirectory)], requestURL, strlen(requestURL));
 
-					printf("------REQUEST DATA PROCESSED:------\nrequestMethod = '%s'\nrequestURL = '%s'\nprotocolVersion = '%s'\nfileName = '%s'\n\n", requestMethod, requestURL, protocolVersion, fileName);
+					printf("------REQUEST DATA PROCESSED (FILE)------\nrequestMethod = '%s'\nrequestURL = '%s'\nprotocolVersion = '%s'\nfileName = '%s'\n\n", requestMethod, requestURL, protocolVersion, fileName);
 
 					// Does the file exist?
 		            if ((fd = open(fileName, O_RDONLY)) != -1)
@@ -405,7 +595,7 @@ void processClient(int clientIndex)
 						}
 
 						// Build default response
-						build200Response();
+						buildResponseHeader(200);
 
 						// Add Content Length parameter
 						appendContentLength(fsize);
@@ -432,10 +622,10 @@ void processClient(int clientIndex)
 						memset((void *)&responsePayloadBuffer, 0, MAX_PAYLOAD_LENGTH);
 
 						// Read the file until end
-		                while ((bytesSent = read(fd, responsePayloadBuffer, MAX_PAYLOAD_LENGTH)) > 0)
+		                while ((bytesRead = read(fd, responsePayloadBuffer, MAX_PAYLOAD_LENGTH)) > 0)
 						{
 		                	// Send payload response buffer to client
-							write(clients[clientIndex], responsePayloadBuffer, bytesSent);
+							write(clients[clientIndex], responsePayloadBuffer, bytesRead);
 						}
 		            }
 		            else
