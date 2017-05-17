@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+
+<html lang="en" xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta charset="utf-8" />
+        <title>HTTP Calculator</title>
+    </head>
+    <body style="font-family:'Segoe UI', Tahoma, Geneva, Verdana, sans-serif">
+        <h1>Welcome to HTTP Calculator Service</h1>
+        <hr />
+        <table style="width: 100%;">
+            <thead>
+                <tr>
+                    <th style="width: 33%;"></th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tr>
+                <td><strong>Usage</strong></td>
+                <td><strong>Result</strong></td>
+            </tr>
+            <tr>
+                <td>/serv/random/&lt;Number&gt;</td>
+                <td>A random floating-point number in the range between 0 and &lt;Number&gt;. E.g., /serv/random/4.8 returns a random number in the range between 0 and 4.8.</td>
+            </tr>
+            <tr>
+                <td>/calc/add/&lt;Number 1&gt;/&lt;Number 2&gt;</td>
+                <td>The sum of the two floating-point numbers &lt;Number 1&gt; and &lt;Number 2&gt;</td>
+            </tr>
+            <tr>
+                <td>/calc/sub/&lt;Number 1&gt;/&lt;Number 2&gt;</td>
+                <td>The difference of the two floating-point numbers &lt;Number 1&gt; and &lt;Number 2&gt;</td>
+            </tr>
+            <tr>
+                <td>/calc/mul/&lt;Number 1&gt;/&lt;Number 2&gt;</td>
+                <td>The product of the two floating-point numbers &lt;Number 1&gt; and &lt;Number 2&gt;</td>
+            </tr>
+            <tr>
+                <td>/calc/div/&lt;Number 1&gt;/&lt;Number 2&gt;</td>
+                <td>The quotient of the two floating-point numbers &lt;Number 1&gt; and &lt;Number 2&gt;</td>
+            </tr>
+            <tr>
+                <td>/calc/mod/&lt;Number 1&gt;/&lt;Number 2&gt;</td>
+                <td>The remainder when dividing the two integer numbers &lt;Number 1&gt; and &lt;Number 2&gt;</td>
+            </tr>
+            <tr>
+                <td>/calc/sqrt/&lt;Number&gt;</td>
+                <td>The square root of the floating-point number &lt;Number&gt;</td>
+            </tr>
+            <tr>
+                <td>/calc/func/sin/&lt;Number&gt;</td>
+                <td>The value of the sine function for the given floating-point radian angle &lt;Number&gt;</td>
+            </tr>
+            <tr>
+                <td>/calc/func/cos/&lt;Number&gt;</td>
+                <td>The value of the cosine function for the given floating-point radian angle &lt;Number&gt;</td>
+            </tr>
+            <tr>
+                <td>/calc/func/tan/&lt;Number&gt;</td>
+                <td>The value of the tangens function for the given floating-point radian angle &lt;Number&gt;</td>
+            </tr>
+        </table>
+        <hr />
+        <p>Copyright &copy; 2017 by Felix Knobl.</p>
+    </body>
+</html>

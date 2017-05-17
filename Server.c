@@ -4,21 +4,21 @@
 /*   Copyright(c) 2017 by Felix Knobl, FH Technikum Wien    */
 /************************************************************/
 
-#include <stdio.h> // printf(), sprintf()
-#include <stdlib.h> // exit()
+#include <stdio.h>
+#include <stdlib.h>
 #include <stdbool.h>
-#include <unistd.h>  // write(), close(), ...
-#include <sys/socket.h> // socket(), bind(), ...
-#include <sys/wait.h>  // waitpid()
+#include <unistd.h>
+#include <sys/socket.h>
+#include <sys/wait.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <netinet/in.h> // struct sockaddr_in
-#include <arpa/inet.h> // inet_ntoa(), ...
-#include <string.h>  // strlen()
-#include <strings.h> // memset(), ...
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <string.h>
+#include <strings.h>
 #include <fcntl.h>
 #include <netdb.h>
-#include <signal.h> // signal()
+#include <signal.h>
 #include <time.h>
 #include <math.h>
 
@@ -33,7 +33,8 @@
 #define MAX_PATH_LENGTH				256
 #define MAX_CONTENT_LENGTH_BUFFER 	256
 #define MAX_PAYLOAD_LENGTH			4096
-#define MAX_URI_LENGTH				32
+#define MAX_URI_LENGTH				64
+#define MAX_CONTENT_TYPE_LENGTH		32
 
 // BUILD: clang -Wall -lm --pedantic -D_POSIX_C_SOURCE=200809L Server.c
 // RUN: change PWD before start
@@ -54,8 +55,18 @@ int main (int argc, char **argv)
 	snprintf(strPort, sizeof(strPort), "%d", DEFAULT_PORTNUMBER);
 
   	// Parsing the command line arguments
-    while ((c = getopt(argc, argv, "p:")) != -1)
+    while ((c = getopt(argc, argv, "p:h")) != -1)
 	{
+		if (c == 'h')
+		{
+			printf("HTTP Calculator Server v1.0\n");
+			printf("===========================\n");
+			printf("Usage: $ ./httpcalc                 ... Starts the server at default port %d\n", DEFAULT_PORTNUMBER);
+			printf("       $ ./httpcalc -p <portnumber> ... Starts the server at port <portnumber>\n");
+			printf("       $ ./httpcalc -h              ... Prints this help and exits the program\n\n");
+			exit(0);
+		}
+
 		if (c == 'p')
 		{
 			// Validate port
@@ -82,6 +93,8 @@ int main (int argc, char **argv)
 
 			break;
 		}
+
+
 	}
 
 	// Init random number generator
@@ -182,6 +195,7 @@ char responsePayloadBuffer[MAX_PAYLOAD_LENGTH];
 
 void buildResponseHeader(int statusCode, char *contentType)
 {
+	// Day/Month constants, since asctime returns incorrect format
 	const char daysOfWeek[7][4] = {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"};
 	const char monthsOfYear[12][4] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
 
@@ -247,9 +261,10 @@ void appendContentLength(int contentLength)
 {
 	char contentLengthBuffer[MAX_CONTENT_LENGTH_BUFFER] = {0, };
 
+	// Build content length buffer
 	snprintf(contentLengthBuffer, MAX_CONTENT_LENGTH_BUFFER, "Content-Length: %d\r\n\r\n", contentLength);
 
-	// Get the absolute location of the file name
+	// Append content length to the header
     strncpy(&responseHeaderBuffer[strlen(responseHeaderBuffer)], contentLengthBuffer, strlen(contentLengthBuffer));
 }
 
@@ -259,39 +274,13 @@ void printResponseHeaderBuffer()
 
 	if (write(STDOUT_FILENO, responseHeaderBuffer, strlen(responseHeaderBuffer)) == -1)
 	{
-		perror ("error writing to screen");
+		perror ("ERROR: Error writing to screen!\n\n");
 		exit(EXIT_FAILURE);
 	}
 }
 
-void sendDataToClient(int clientIndex, bool sendPayload)
+void closeConnection(int clientIndex)
 {
-	// Append Content Length property
-	appendContentLength(strlen(responsePayloadBuffer));
-
-	printResponseHeaderBuffer();
-
-	// Send response header buffer to client
-	if (write(clients[clientIndex], responseHeaderBuffer, strlen(responseHeaderBuffer)) > 0)
-	{
-		if (sendPayload && strlen(responsePayloadBuffer) > 0)
-		{
-			// Send payload response buffer to client
-			if (write(clients[clientIndex], responsePayloadBuffer, strlen(responsePayloadBuffer)) > 0)
-			{
-				printf("INFO: Data sent to client OK!\n");
-			}
-			else
-			{
-				printf("ERROR: Error sending Payload to client!\n");
-			}
-		}
-	}
-	else
-	{
-		printf("ERROR: Error sending Header to client!\n");
-	}
-
     // Close SOCKET
     if (shutdown(clients[clientIndex], SHUT_RDWR) == -1)
 	{
@@ -304,6 +293,185 @@ void sendDataToClient(int clientIndex, bool sendPayload)
 	}
 
     clients[clientIndex] = -1;
+}
+
+// This function appends the content length property to the header.
+// It sends the header and also the payload if required and available to the client.
+// Finally, the connection gets closed and the client freed.
+void sendDataToClient(int clientIndex, bool sendPayload, char *file)
+{
+	if (file != NULL)
+	{
+		// Send a file
+		int fd = 0;
+		char fileName[MAX_PATH_LENGTH] = {0, };
+		char *rootDirectory;
+
+		// Get the root directory
+		rootDirectory = getenv("PWD");
+
+		// Check root directory
+		if (rootDirectory == NULL)
+		{
+			printf("ERROR: Could not get root directory!\n");
+			closeConnection(clientIndex);
+			return;
+		}
+
+		// Get the absolute location to the file name
+		strncpy(fileName, rootDirectory, strlen(rootDirectory));
+		strncpy(&fileName[strlen(rootDirectory)], file, strlen(file));
+
+		printf("INFO: Client requested file: %s\n", fileName);
+
+		// Open the file if it exists
+		if ((fd = open(fileName, O_RDONLY)) != -1)
+		{
+			off_t fsize;
+			int bytesRead = 0;
+
+			// Get file length
+			fsize = lseek(fd, 0, SEEK_END);
+
+			// Check file length
+			if (fsize == -1)
+			{
+				printf("ERROR: File size error!\n");
+				closeConnection(clientIndex);
+				return;
+			}
+			else
+			{
+				// Seek to the beginning of the file
+				lseek(fd, 0, SEEK_SET);
+			}
+
+			// Check file extension and build content type
+		    char *fileExtension = NULL;
+			char contentTypeBuffer[MAX_CONTENT_TYPE_LENGTH] = "text/html";
+
+			fileExtension = strrchr(fileName, '.');
+
+			// File extension not found?
+			if (fileExtension == NULL)
+			{
+				printf("ERROR: File extension not found!\n");
+			}
+			else
+			{
+				// Compare file extension and set the content type
+				if (strncmp(fileExtension, ".ico", 4) == 0)
+				{
+					memset(contentTypeBuffer, 0, MAX_CONTENT_TYPE_LENGTH);
+					memcpy(contentTypeBuffer, "image/x-icon", sizeof("image/x-icon"));
+				}
+			}
+
+			// Build response
+			buildResponseHeader(200, contentTypeBuffer);
+
+			// Add Content Length parameter
+			if (sendPayload)
+			{
+				appendContentLength(fsize);
+			}
+			else
+			{
+				appendContentLength(0);
+			}
+
+			printResponseHeaderBuffer();
+
+			// Send response header buffer to client
+			if (write(clients[clientIndex], responseHeaderBuffer, strlen(responseHeaderBuffer)) == strlen(responseHeaderBuffer))
+			{
+				printf("INFO: Response header sent OK!\n");
+			}
+			else
+			{
+				printf("ERROR: Failed sending response header to client!\n");
+				closeConnection(clientIndex);
+				return;
+			}
+
+			if (sendPayload)
+			{
+				// Clear payload buffer
+				memset((void *)&responsePayloadBuffer, 0, MAX_PAYLOAD_LENGTH);
+
+				// Read the file until end
+				while ((bytesRead = read(fd, responsePayloadBuffer, MAX_PAYLOAD_LENGTH)) > 0)
+				{
+					// Send payload response buffer to client
+					if (write(clients[clientIndex], responsePayloadBuffer, bytesRead) != bytesRead)
+					{
+						printf("ERROR: Error sending file fragment to client!\n");
+
+						// Close the file
+						if (close(fd) == -1)
+						{
+							printf("ERROR: Could not close the file!\n");
+						}
+
+						// Close connection
+						closeConnection(clientIndex);
+
+						return;
+					}
+				}
+			}
+
+			// Close the file
+			if (close(fd) == -1)
+			{
+				printf("ERROR: Could not close the file!\n");
+			}
+        }
+		else
+		{
+			printf("ERROR: File not found!\n");
+
+			// Overwrite current built response and build a new one for 404
+			buildResponseHeader(404, "text/html");
+
+			// Recursive call to send 404
+			sendDataToClient(clientIndex, false, NULL);
+
+			return;
+		}
+	}
+	else
+	{
+		// Send the custom template
+		// Append Content Length property
+		appendContentLength(strlen(responsePayloadBuffer));
+
+		printResponseHeaderBuffer();
+
+		// Send response header buffer to client
+		if (write(clients[clientIndex], responseHeaderBuffer, strlen(responseHeaderBuffer)) > 0)
+		{
+			if (sendPayload && strlen(responsePayloadBuffer) > 0)
+			{
+				// Send payload response buffer to client
+				if (write(clients[clientIndex], responsePayloadBuffer, strlen(responsePayloadBuffer)) == strlen(responsePayloadBuffer))
+				{
+					printf("INFO: Data sent to client OK!\n");
+				}
+				else
+				{
+					printf("ERROR: Error sending Payload to client!\n");
+				}
+			}
+		}
+		else
+		{
+			printf("ERROR: Error sending Header to client!\n");
+		}
+	}
+
+	// Close connection
+	closeConnection(clientIndex);
 }
 
 bool convertToDouble(char *input, double *result)
@@ -326,25 +494,10 @@ bool convertToDouble(char *input, double *result)
 // Process client connection
 void processClient(int clientIndex)
 {
-    char *rootDirectory;
-	char *requestMethod, *requestURL, *protocolVersion;
-	char clientRequestBuffer[MAX_REQUEST_LENGTH], fileName[MAX_PATH_LENGTH];
-
-	int fd, n;
-	int bytesSent = 0, bytesRead = 0;
-
+    char *requestMethod, *requestURL, *protocolVersion;
+	char clientRequestBuffer[MAX_REQUEST_LENGTH] = {0, };
+	int n = 0, bytesRead = 0;
 	bool sendPayload = false;
-
-	// Get root directory
-	rootDirectory = getenv("PWD");
-
-	if (rootDirectory == NULL)
-	{
-		printf("ERROR: Could not get root directory!\n\n");
-	}
-
-	// Clear buffer
-    memset((void *)clientRequestBuffer, 0, MAX_REQUEST_LENGTH);
 
 	// Receive client request
     bytesRead = recv(clients[clientIndex], clientRequestBuffer, MAX_REQUEST_LENGTH, 0);
@@ -352,319 +505,392 @@ void processClient(int clientIndex)
     if (bytesRead < 0)
 	{
         printf("ERROR: Receive error client ID: %d!\n", clientIndex);
+		closeConnection(clientIndex);
+		return;
 	}
-    else if (bytesRead == 0)
+
+    if (bytesRead == 0)
 	{
         printf("ERROR: Client ID: %d disconnected upexpectedly. Receive Socket closed!\n", clientIndex);
+		closeConnection(clientIndex);
+		return;
 	}
+
+    // Data received
+	printf("------HTTP REQUEST------\n%s\n\n", clientRequestBuffer);
+
+	// Parse request method
+	requestMethod = strtok(clientRequestBuffer, " \t\r\n");
+
+	// Check request method
+	if (requestMethod == NULL)
+	{
+		printf("ERROR: HTTP REQUEST not found!");
+		buildResponseHeader(405, "text/html");
+		sendDataToClient(clientIndex, false, NULL);
+		return;
+	}
+	else if (strncmp(requestMethod, "GET\0", 4) == 0)
+	{
+		sendPayload = true;
+	}
+	else if (strncmp(requestMethod, "HEAD\0", 5) == 0)
+    {
+		sendPayload = false;
+	}
+	else
+	{
+		buildResponseHeader(405, "text/html");
+		sendDataToClient(clientIndex, false, NULL);
+		return;
+	}
+
+	// Parse requestURL
+    requestURL = strtok(NULL, " \t");
+
+	// Check requestURL
+	if (requestURL == NULL)
+	{
+		buildResponseHeader(400, "text/html");
+		sendDataToClient(clientIndex, false, NULL);
+		return;
+	}
+
+	// Parse protocolVersion
+    protocolVersion = strtok(NULL, " \t\r\n");
+
+	// Check protocolVersion
+	if (requestURL == NULL)
+	{
+		buildResponseHeader(400, "text/html");
+		sendDataToClient(clientIndex, false, NULL);
+		return;
+	}
+
+	// Check URL length
+	if (strlen(requestURL) > MAX_URI_LENGTH)
+	{
+		buildResponseHeader(414, "text/html");
+		sendDataToClient(clientIndex, sendPayload, NULL);
+		return;
+	}
+
+	printf("------REQUEST DATA:------\nrequestMethod = '%s'\nrequestURL = '%s'\nprotocolVersion = '%s'\n\n", requestMethod, requestURL, protocolVersion);
+
+	// Check HTTP protocol version
+	if (strncmp(protocolVersion, "HTTP/1.0", 8) != 0 && strncmp(protocolVersion, "HTTP/1.1", 8) != 0)
+    {
+		// Wrong HTTP version or bad request
+		write(clients[clientIndex], "HTTP/1.0 400 Bad Request\r\n", 26);
+    }
     else
     {
-        // Data received
-		printf("------HTTP REQUEST------\n%s\n\n", clientRequestBuffer);
-
-		requestMethod = strtok(clientRequestBuffer, " \t\r\n");		// Parse Request Method
-
-		if (requestMethod == NULL)
+		// Check and remove trailing "/"
+		for (n = strlen(requestURL) - 1; n > 0; n--)
 		{
-			printf("ERROR: HTTP REQUEST not found!");
-			buildResponseHeader(405, "text/html");
-			sendDataToClient(clientIndex, false);
+			if (requestURL[n] == '/')
+			{
+				requestURL[n] = '\0';
+			}
+			else
+			{
+				break;
+			}
+		}
+
+		// Check URL
+		if ((strncmp(requestURL, "/\0", 2) == 0) ||	(strncmp(requestURL, "/index.htm\0", 11) == 0))
+		{
+			requestURL = "/index.html";
+		}
+
+		printf("------REQUEST DATA (TRAILED)------\nrequestMethod = '%s'\nrequestURL = '%s'\nprotocolVersion = '%s'\n\n", requestMethod, requestURL, protocolVersion);
+
+		// HANDLER
+		if (strncmp(requestURL, "/serv/random", 12) == 0)
+		{
+			// HANDLING: A random floating-point number in the range between 0 and <Number>
+			const char randomServiceTemplate[] = "<html><head><title>Random Number Service</title></head><body>Your random number between 0 and %f is %f.</body></html>";
+			double number = 0;
+			double result = 0;
+
+			requestURL += 12;
+
+			if (*requestURL == '\0')
+			{
+				// Build HTTP response
+				buildResponseHeader(400, "text/html");
+			}
+			else if (convertToDouble(++requestURL, &number) && number >= 0)
+			{
+				// Generate a random number
+				srand(time(NULL));
+				result = ((double)rand() / (double)(RAND_MAX)) * number;
+
+				// Build HTTP response
+				buildResponseHeader(200, "text/html");
+
+				// Create webpage from template
+				snprintf(responsePayloadBuffer, MAX_PAYLOAD_LENGTH, randomServiceTemplate, number, result);
+			}
+			else
+			{
+				// Build HTTP response
+				buildResponseHeader(500, "text/html");
+			}
+
+			// Send data
+			sendDataToClient(clientIndex, sendPayload, NULL);
+
 			return;
 		}
-		else if (strncmp(requestMethod, "GET\0", 4) == 0)
+		else if (strncmp(requestURL, "/calc/sqrt", 10) == 0)
 		{
-			sendPayload = true;
-		}
-		else if (strncmp(requestMethod, "HEAD\0", 5) == 0)
-        {
-			sendPayload = false;
-		}
-		else
-		{
-			buildResponseHeader(405, "text/html");
-			sendDataToClient(clientIndex, false);
+			// HANDLING: The square root of the floating-point number
+			const char squareRootTemplate[] = "<html><head><title>Square Root Calculator</title></head><body>The square root of the number %f is %f.</body></html>";
+			double number = 0;
+			double result = 0;
+
+			requestURL += 10;
+
+			if (*requestURL == '\0')
+			{
+				// Build HTTP response
+				buildResponseHeader(400, "text/html");
+			}
+			else if (convertToDouble(++requestURL, &number) && number >= 0)
+			{
+				// Calculate result
+				result = sqrt(number);
+
+				// Build HTTP response
+				buildResponseHeader(200, "text/html");
+
+				// Create webpage from template
+				snprintf(responsePayloadBuffer, MAX_PAYLOAD_LENGTH, squareRootTemplate, number, result);
+			}
+			else
+			{
+				// Build HTTP response
+				buildResponseHeader(500, "text/html");
+			}
+
+			// Send data
+			sendDataToClient(clientIndex, sendPayload, NULL);
+
 			return;
 		}
-
-		// Parse request
-        requestURL = strtok (NULL, " \t");	 		// Parse URL
-        protocolVersion = strtok (NULL, " \t\r\n"); // Parse HTTP version
-
-		// Check URL length
-		if (strlen(requestURL) > MAX_URI_LENGTH)
+		else if (strncmp(requestURL, "/calc/func/sin", 14) == 0)
 		{
-			buildResponseHeader(414, "text/html");
-			sendDataToClient(clientIndex, sendPayload);
+			// HANDLING: The value of the sine function for the given floating-point radian angle <Number>
+			const char sinTemplate[] = "<html><head><title>Sine Calculator</title></head><body>The result of the sine function for the radian angle number %f is %f.</body></html>";
+			double number = 0;
+			double result = 0;
+
+			// Move pointer to the start of the number
+			requestURL += 14;
+
+			if (*requestURL == '\0')
+			{
+				// Build HTTP response
+				buildResponseHeader(400, "text/html");
+			}
+			else if (convertToDouble(++requestURL, &number))
+			{
+				// Calculate result
+				result = sin(number);
+
+				// Build HTTP response
+				buildResponseHeader(200, "text/html");
+
+				// Create webpage from template
+				snprintf(responsePayloadBuffer, MAX_PAYLOAD_LENGTH, sinTemplate, number, result);
+			}
+			else
+			{
+				// Build HTTP response
+				buildResponseHeader(500, "text/html");
+			}
+
+			// Send data
+			sendDataToClient(clientIndex, sendPayload, NULL);
+
 			return;
 		}
+		else if (strncmp(requestURL, "/calc/func/cos", 14) == 0)
+		{
+			// HANDLING: The value of the cosinus function for the given floating-point radian angle <Number>
+			const char cosTemplate[] = "<html><head><title>Cosine Calculator</title></head><body>The result of the cosine function for the radian angle number %f is %f.</body></html>";
+			double number = 0;
+			double result = 0;
 
-		printf("------REQUEST DATA:------\nrequestMethod = '%s'\nrequestURL = '%s'\nprotocolVersion = '%s'\n\n", requestMethod, requestURL, protocolVersion);
+			// Move pointer to the start of the number
+			requestURL += 14;
 
-		// Check HTTP protocol version
-		if (strncmp(protocolVersion, "HTTP/1.0", 8) != 0 && strncmp(protocolVersion, "HTTP/1.1", 8) != 0)
-        {
-			// Wrong HTTP version or bad request
-			write(clients[clientIndex], "HTTP/1.0 400 Bad Request\r\n", 26);
-        }
-        else
-        {
-			// Check and remove trailing "/"
-			for (n = strlen(requestURL) - 1; n > 0; n--)
+			if (*requestURL == '\0')
 			{
-				if (requestURL[n] == '/')
-				{
-					requestURL[n] = '\0';
-				}
-				else
-				{
-					break;
-				}
+				// Build HTTP response
+				buildResponseHeader(400, "text/html");
+			}
+			else if (convertToDouble(++requestURL, &number))
+			{
+				// Calculate result
+				result = cos(number);
+
+				// Build HTTP response
+				buildResponseHeader(200, "text/html");
+
+				// Create webpage from template
+				snprintf(responsePayloadBuffer, MAX_PAYLOAD_LENGTH, cosTemplate, number, result);
+			}
+			else
+			{
+				// Build HTTP response
+				buildResponseHeader(500, "text/html");
 			}
 
-			// Check URL
-			if ((strncmp(requestURL, "/\0", 2) == 0) ||	(strncmp(requestURL, "/index.htm\0", 11) == 0))
+			// Send data
+			sendDataToClient(clientIndex, sendPayload, NULL);
+
+			return;
+		}
+		else if (strncmp(requestURL, "/calc/func/tan", 14) == 0)
+		{
+			// HANDLING: The value of the tangens function for the given floating-point radian angle <Number>
+			const char tanTemplate[] = "<html><head><title>Tangens Calculator</title></head><body>The result of the tangens function for the radian angle number %f is %f.</body></html>";
+			double number = 0;
+			double result = 0;
+
+			// Move pointer to the start of the number
+			requestURL += 14;
+
+			if (*requestURL == '\0')
 			{
-				requestURL = "/index.html";
+				// Build HTTP response
+				buildResponseHeader(400, "text/html");
+			}
+			else if (convertToDouble(++requestURL, &number))
+			{
+				// Calculate result
+				result = tan(number);
+
+				// Build HTTP response
+				buildResponseHeader(200, "text/html");
+
+				// Create webpage from template
+				snprintf(responsePayloadBuffer, MAX_PAYLOAD_LENGTH, tanTemplate, number, result);
+			}
+			else
+			{
+				// Build HTTP response
+				buildResponseHeader(500, "text/html");
 			}
 
-			printf("------REQUEST DATA (TRAILED)------\nrequestMethod = '%s'\nrequestURL = '%s'\nprotocolVersion = '%s'\n\n", requestMethod, requestURL, protocolVersion);
+			// Send data
+			sendDataToClient(clientIndex, sendPayload, NULL);
 
-			// HANDLER
-			if (strncmp(requestURL, "/serv/random", 12) == 0)
+			return;
+		}
+		else if ((strncmp(requestURL, "/calc/add", 9) == 0) ||
+				 (strncmp(requestURL, "/calc/sub", 9) == 0) ||
+				 (strncmp(requestURL, "/calc/mul", 9) == 0) ||
+				 (strncmp(requestURL, "/calc/div", 9) == 0) ||
+				 (strncmp(requestURL, "/calc/mod", 9) == 0))
+		{
+			// HANDLING: The add, sub, mul, div, mod of the two floating-point numbers <Number 1> and <Number 2>
+			// Get the operation
+			requestURL += 6;
+
+			char operationBuffer[4] = {0, };
+			memcpy(operationBuffer, requestURL, 3);
+
+			const char calcTemplate[] = "<html><head><title>Calculator</title></head><body>The result of your requested operation (%s) is %f.</body></html>";
+			double number1 = 0;
+			double number2 = 0;
+			double result = 0;
+			char *token;
+
+			// Move pointer to the start of the number
+			requestURL += 3;
+
+			if (*requestURL == '\0')
 			{
-				// HANDLING: A random floating-point number in the range between 0 and <Number>
-				const char randomServiceTemplate[] = "<html><head><title>Random Number Service</title></head><body>Your random number between 0 and %f is %f.</body></html>";
-				double number = 0;
-				double result = 0;
+				// Build HTTP response
+				buildResponseHeader(400, "text/html");
+			}
+			else
+			{
+				token = strtok(++requestURL, "/");
 
-				requestURL += 12;
-
-				if (*requestURL == '\0')
+				if (token == NULL)
 				{
 					// Build HTTP response
 					buildResponseHeader(400, "text/html");
 				}
-				else if (convertToDouble(++requestURL, &number) && number >= 0)
+				else if (convertToDouble(token, &number1))
 				{
-					// Generate a random number
-					srand(time(NULL));
-					result = ((double)rand() / (double)(RAND_MAX)) * number;
-
-					// Build HTTP response
-					buildResponseHeader(200, "text/html");
-
-					// Create webpage from template
-					snprintf(responsePayloadBuffer, MAX_PAYLOAD_LENGTH, randomServiceTemplate, number, result);
-				}
-				else
-				{
-					// Build HTTP response
-					buildResponseHeader(500, "text/html");
-				}
-
-				// Send data
-				sendDataToClient(clientIndex, sendPayload);
-
-				return;
-			}
-			else if (strncmp(requestURL, "/calc/sqrt", 10) == 0)
-			{
-				// HANDLING: The square root of the floating-point number
-				const char squareRootTemplate[] = "<html><head><title>Square Root Calculator</title></head><body>The square root of the number %f is %f.</body></html>";
-				double number = 0;
-				double result = 0;
-
-				requestURL += 10;
-
-				if (*requestURL == '\0')
-				{
-					// Build HTTP response
-					buildResponseHeader(400, "text/html");
-				}
-				else if (convertToDouble(++requestURL, &number) && number >= 0)
-				{
-					// Calculate result
-					result = sqrt(number);
-
-					// Build HTTP response
-					buildResponseHeader(200, "text/html");
-
-					// Create webpage from template
-					snprintf(responsePayloadBuffer, MAX_PAYLOAD_LENGTH, squareRootTemplate, number, result);
-				}
-				else
-				{
-					// Build HTTP response
-					buildResponseHeader(500, "text/html");
-				}
-
-				// Send data
-				sendDataToClient(clientIndex, sendPayload);
-
-				return;
-			}
-			else if (strncmp(requestURL, "/calc/func/sin", 14) == 0)
-			{
-				// HANDLING: The value of the sine function for the given floating-point radian angle <Number>
-				const char sinTemplate[] = "<html><head><title>Sine Calculator</title></head><body>The result of the sine function for the radian angle number %f is %f.</body></html>";
-				double number = 0;
-				double result = 0;
-
-				// Move pointer to the start of the number
-				requestURL += 14;
-
-				if (*requestURL == '\0')
-				{
-					// Build HTTP response
-					buildResponseHeader(400, "text/html");
-				}
-				else if (convertToDouble(++requestURL, &number))
-				{
-					// Calculate result
-					result = sin(number);
-
-					// Build HTTP response
-					buildResponseHeader(200, "text/html");
-
-					// Create webpage from template
-					snprintf(responsePayloadBuffer, MAX_PAYLOAD_LENGTH, sinTemplate, number, result);
-				}
-				else
-				{
-					// Build HTTP response
-					buildResponseHeader(500, "text/html");
-				}
-
-				// Send data
-				sendDataToClient(clientIndex, sendPayload);
-
-				return;
-			}
-			else if (strncmp(requestURL, "/calc/func/cos", 14) == 0)
-			{
-				// HANDLING: The value of the cosinus function for the given floating-point radian angle <Number>
-				const char cosTemplate[] = "<html><head><title>Cosine Calculator</title></head><body>The result of the cosine function for the radian angle number %f is %f.</body></html>";
-				double number = 0;
-				double result = 0;
-
-				// Move pointer to the start of the number
-				requestURL += 14;
-
-				if (*requestURL == '\0')
-				{
-					// Build HTTP response
-					buildResponseHeader(400, "text/html");
-				}
-				else if (convertToDouble(++requestURL, &number))
-				{
-					// Calculate result
-					result = cos(number);
-
-					// Build HTTP response
-					buildResponseHeader(200, "text/html");
-
-					// Create webpage from template
-					snprintf(responsePayloadBuffer, MAX_PAYLOAD_LENGTH, cosTemplate, number, result);
-				}
-				else
-				{
-					// Build HTTP response
-					buildResponseHeader(500, "text/html");
-				}
-
-				// Send data
-				sendDataToClient(clientIndex, sendPayload);
-
-				return;
-			}
-			else if (strncmp(requestURL, "/calc/func/tan", 14) == 0)
-			{
-				// HANDLING: The value of the tangens function for the given floating-point radian angle <Number>
-				const char tanTemplate[] = "<html><head><title>Tangens Calculator</title></head><body>The result of the tangens function for the radian angle number %f is %f.</body></html>";
-				double number = 0;
-				double result = 0;
-
-				// Move pointer to the start of the number
-				requestURL += 14;
-
-				if (*requestURL == '\0')
-				{
-					// Build HTTP response
-					buildResponseHeader(400, "text/html");
-				}
-				else if (convertToDouble(++requestURL, &number))
-				{
-					// Calculate result
-					result = tan(number);
-
-					// Build HTTP response
-					buildResponseHeader(200, "text/html");
-
-					// Create webpage from template
-					snprintf(responsePayloadBuffer, MAX_PAYLOAD_LENGTH, tanTemplate, number, result);
-				}
-				else
-				{
-					// Build HTTP response
-					buildResponseHeader(500, "text/html");
-				}
-
-				// Send data
-				sendDataToClient(clientIndex, sendPayload);
-
-				return;
-			}
-			else if (strncmp(requestURL, "/calc/add", 9) == 0)
-			{
-				// HANDLING: The sum of the two floating-point numbers <Number 1> and <Number 2>
-				const char tanTemplate[] = "<html><head><title>Sum Calculator</title></head><body>The sum of your two floating-point numbers is: %f + %f = %f.</body></html>";
-				double number1 = 0;
-				double number2 = 0;
-				double result = 0;
-				char *token;
-
-				// Move pointer to the start of the number
-				requestURL += 9;
-
-				if (*requestURL == '\0')
-				{
-					// Build HTTP response
-					buildResponseHeader(400, "text/html");
-				}
-				else
-				{
-					token = strtok(++requestURL, "/");
+					token = strtok(NULL, "/");
 
 					if (token == NULL)
 					{
 						// Build HTTP response
 						buildResponseHeader(400, "text/html");
 					}
-					else if (convertToDouble(token, &number1))
+					else if (convertToDouble(token, &number2))
 					{
-						token = strtok(NULL, "/");
-
-						if (token == NULL)
+						// Calculate result
+						if (strncmp(operationBuffer, "add", 3) == 0)
 						{
-							// Build HTTP response
-							buildResponseHeader(400, "text/html");
-						}
-						else if (convertToDouble(token, &number2))
-						{
-							// Calculate result
 							result = number1 + number2;
-
-							// Build HTTP response
-							buildResponseHeader(200, "text/html");
-
-							// Create webpage from template
-							snprintf(responsePayloadBuffer, MAX_PAYLOAD_LENGTH, tanTemplate, number1, number2, result);
 						}
-						else
+						else if (strncmp(operationBuffer, "sub", 3) == 0)
 						{
-							// Build HTTP response
-							buildResponseHeader(500, "text/html");
+							result = number1 - number2;
 						}
+						else if (strncmp(operationBuffer, "mul", 3) == 0)
+						{
+							result = number1 * number2;
+						}
+						else if (strncmp(operationBuffer, "div", 3) == 0)
+						{
+							if (number2 == 0)
+							{
+								// Build HTTP response
+								buildResponseHeader(500, "text/html");
+
+								// Send data
+								sendDataToClient(clientIndex, sendPayload, NULL);
+
+								return;
+							}
+							else
+							{
+								result = number1 / number2;
+							}
+						}
+						else if (strncmp(operationBuffer, "mod", 3) == 0)
+						{
+							if (number2 == 0)
+							{
+								// Build HTTP response
+								buildResponseHeader(500, "text/html");
+
+								// Send data
+								sendDataToClient(clientIndex, sendPayload, NULL);
+
+								return;
+							}
+							else
+							{
+								result = (int)number1 % (int)number2;
+							}
+						}
+
+						// Build HTTP response
+						buildResponseHeader(200, "text/html");
+
+						// Create webpage from template
+						snprintf(responsePayloadBuffer, MAX_PAYLOAD_LENGTH, calcTemplate, operationBuffer, result);
 					}
 					else
 					{
@@ -672,84 +898,23 @@ void processClient(int clientIndex)
 						buildResponseHeader(500, "text/html");
 					}
 				}
-
-				// Send data
-				sendDataToClient(clientIndex, sendPayload);
-
-				return;
-			}
-			else
-			{
-				// Send a File
-				//
-				// Get the absolute location of the file name
-				strncpy(fileName, rootDirectory, strlen(rootDirectory));
-	            strncpy(&fileName[strlen(rootDirectory)], requestURL, strlen(requestURL));
-
-				printf("------REQUEST DATA PROCESSED (FILE)------\nrequestMethod = '%s'\nrequestURL = '%s'\nprotocolVersion = '%s'\nfileName = '%s'\n\n", requestMethod, requestURL, protocolVersion, fileName);
-
-				// Does the file exist?
-	            if ((fd = open(fileName, O_RDONLY)) != -1)
-	            {
-					off_t fsize;
-
-					// Get file length
-					fsize = lseek(fd, 0, SEEK_END);
-
-					// Check file length
-					if (fsize == -1)
-					{
-						fsize = 0;
-					}
-
-					// Build default response
-					buildResponseHeader(200, "text/html");
-
-					// Add Content Length parameter
-					appendContentLength(fsize);
-
-					printResponseHeaderBuffer();
-
-					// Seek to the beginning of the file
-					lseek(fd, 0, SEEK_SET);
-
-					// Send response header to client
-					bytesSent = write(clients[clientIndex], responseHeaderBuffer, strlen(responseHeaderBuffer));
-
-					// Check send status
-					if (bytesSent == strlen(responseHeaderBuffer))
-					{
-						printf("INFO: Response header sent OK!\n\n");
-					}
-					else
-					{
-						printf("ERROR: Failed sending response header to client!\n\n");
-					}
-
-					// Clear response buffer
-					memset((void *)&responsePayloadBuffer, 0, MAX_PAYLOAD_LENGTH);
-
-					// Read the file until end
-	                while ((bytesRead = read(fd, responsePayloadBuffer, MAX_PAYLOAD_LENGTH)) > 0)
-					{
-	                	// Send payload response buffer to client
-						write(clients[clientIndex], responsePayloadBuffer, bytesRead);
-					}
-	            }
-	            else
+				else
 				{
-					// Send File Not Found to client
-					write(clients[clientIndex], "HTTP/1.0 404 Not Found\r\n", 24);
+					// Build HTTP response
+					buildResponseHeader(500, "text/html");
 				}
-
-				printf("Closing Socket\n");
-
-				// Closing SOCKET
-				shutdown(clients[clientIndex], SHUT_RDWR);
-				close(clients[clientIndex]);
-				clients[clientIndex] = -1;
 			}
-        }
+
+			// Send data
+			sendDataToClient(clientIndex, sendPayload, NULL);
+
+			return;
+		}
+		else
+		{
+			// HANDLING: Send a File
+			sendDataToClient(clientIndex, sendPayload, requestURL);
+		}
     }
 }
 
